@@ -45,6 +45,13 @@ try:
 except ImportError:
     IFLOW_DEFAULT_OAUTH_PORT = 11451
 
+try:
+    from rotator_library.providers.openai_codex_auth_base import OpenAICodexAuthBase
+
+    OPENAI_CODEX_DEFAULT_OAUTH_PORT = OpenAICodexAuthBase.CALLBACK_PORT
+except ImportError:
+    OPENAI_CODEX_DEFAULT_OAUTH_PORT = 1455
+
 
 def clear_screen(subtitle: str = ""):
     """
@@ -553,11 +560,21 @@ IFLOW_SETTINGS = {
     },
 }
 
+# OpenAI Codex provider environment variables
+OPENAI_CODEX_SETTINGS = {
+    "OPENAI_CODEX_OAUTH_PORT": {
+        "type": "int",
+        "default": OPENAI_CODEX_DEFAULT_OAUTH_PORT,
+        "description": "Local port for OAuth callback server during authentication",
+    },
+}
+
 # Map provider names to their settings definitions
 PROVIDER_SETTINGS_MAP = {
     "antigravity": ANTIGRAVITY_SETTINGS,
     "gemini_cli": GEMINI_CLI_SETTINGS,
     "iflow": IFLOW_SETTINGS,
+    "openai_codex": OPENAI_CODEX_SETTINGS,
 }
 
 

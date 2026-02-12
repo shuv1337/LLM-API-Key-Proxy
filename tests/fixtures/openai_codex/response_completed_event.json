@@ -1,0 +1,77 @@
+{
+  "type": "response.completed",
+  "response": {
+    "id": "id_redacted_10",
+    "object": "response",
+    "created_at": 1770926997,
+    "status": "completed",
+    "background": false,
+    "completed_at": 1770926998,
+    "error": null,
+    "frequency_penalty": 0.0,
+    "incomplete_details": null,
+    "instructions": "You are a concise assistant.",
+    "max_output_tokens": null,
+    "max_tool_calls": null,
+    "model": "gpt-5.1-codex",
+    "output": [
+      {
+        "id": "id_redacted_11",
+        "type": "reasoning",
+        "summary": []
+      },
+      {
+        "id": "id_redacted_12",
+        "type": "message",
+        "status": "completed",
+        "content": [
+          {
+            "type": "output_text",
+            "annotations": [],
+            "logprobs": [],
+            "text": "pong"
+          }
+        ],
+        "role": "assistant"
+      }
+    ],
+    "parallel_tool_calls": true,
+    "presence_penalty": 0.0,
+    "previous_response_id": null,
+    "prompt_cache_key": "prompt_cache_key_redacted_4",
+    "prompt_cache_retention": null,
+    "reasoning": {
+      "effort": "medium",
+      "summary": null
+    },
+    "safety_identifier": "safety_identifier_redacted_4",
+    "service_tier": "default",
+    "store": false,
+    "temperature": 1.0,
+    "text": {
+      "format": {
+        "type": "text"
+      },
+      "verbosity": "medium"
+    },
+    "tool_choice": "auto",
+    "tools": [],
+    "top_logprobs": 0,
+    "top_p": 1.0,
+    "truncation": "disabled",
+    "usage": {
+      "input_tokens": 21,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 13,
+      "output_tokens_details": {
+        "reasoning_tokens": 0
+      },
+      "total_tokens": 34
+    },
+    "user": null,
+    "metadata": {}
+  },
+  "sequence_number": 10
+}

@@ -205,15 +205,17 @@ The `CredentialManager` class (`credential_manager.py`) centralizes the lifecycl
 
 On startup (unless `SKIP_OAUTH_INIT_CHECK=true`), the manager performs a comprehensive sweep:
 
-1. **System-Wide Scan**: Searches for OAuth credential files in standard locations:
+1. **System-Wide Scan / Import Sources**:
    - `~/.gemini/` → All `*.json` files (typically `credentials.json`)
    - `~/.qwen/` → All `*.json` files (typically `oauth_creds.json`)
-   - `~/.iflow/` → All `*. json` files
+   - `~/.iflow/` → All `*.json` files
+   - `~/.codex/auth.json` + `~/.codex-accounts.json` → OpenAI Codex first-run import sources
 
 2. **Local Import**: Valid credentials are **copied** (not moved) to the project's `oauth_creds/` directory with standardized names:
-   -  `gemini_cli_oauth_1.json`, `gemini_cli_oauth_2.json`, etc.
+   - `gemini_cli_oauth_1.json`, `gemini_cli_oauth_2.json`, etc.
    - `qwen_code_oauth_1.json`, `qwen_code_oauth_2.json`, etc.
    - `iflow_oauth_1.json`, `iflow_oauth_2.json`, etc.
+   - `openai_codex_oauth_1.json`, `openai_codex_oauth_2.json`, etc.
 
 3. **Intelligent Deduplication**: 
    - The manager inspects each credential file for a `_proxy_metadata` field containing the user's email or ID
@@ -292,6 +294,24 @@ IFLOW_EMAIL
 IFLOW_API_KEY
 ```
 
+**OpenAI Codex Environment Variables:**
+```
+OPENAI_CODEX_ACCESS_TOKEN
+OPENAI_CODEX_REFRESH_TOKEN
+OPENAI_CODEX_EXPIRY_DATE
+OPENAI_CODEX_ID_TOKEN
+OPENAI_CODEX_ACCOUNT_ID
+OPENAI_CODEX_EMAIL
+
+# Numbered multi-account format
+OPENAI_CODEX_1_ACCESS_TOKEN
+OPENAI_CODEX_1_REFRESH_TOKEN
+OPENAI_CODEX_1_EXPIRY_DATE
+OPENAI_CODEX_1_ID_TOKEN
+OPENAI_CODEX_1_ACCOUNT_ID
+OPENAI_CODEX_1_EMAIL
+```
+
 **How it works:**
 - If the manager finds (e.g.) `GEMINI_CLI_ACCESS_TOKEN` or `GEMINI_CLI_1_ACCESS_TOKEN`, it constructs an in-memory credential object that mimics the file structure
 - The credential is referenced internally as `env://gemini_cli/0` (legacy) or `env://gemini_cli/1` (numbered)
@@ -304,9 +324,11 @@ IFLOW_API_KEY
 env://{provider}/{index}
 
 Examples:
-- env://gemini_cli/1  → GEMINI_CLI_1_ACCESS_TOKEN, etc.
-- env://gemini_cli/0  → GEMINI_CLI_ACCESS_TOKEN (legacy single credential)
-- env://antigravity/1 → ANTIGRAVITY_1_ACCESS_TOKEN, etc.
+- env://gemini_cli/1    → GEMINI_CLI_1_ACCESS_TOKEN, etc.
+- env://gemini_cli/0    → GEMINI_CLI_ACCESS_TOKEN (legacy single credential)
+- env://antigravity/1   → ANTIGRAVITY_1_ACCESS_TOKEN, etc.
+- env://openai_codex/1  → OPENAI_CODEX_1_ACCESS_TOKEN, etc.
+- env://openai_codex/0  → OPENAI_CODEX_ACCESS_TOKEN (legacy single credential)
 ```
 
 #### 2.6.3. Credential Tool Integration
@@ -314,7 +336,7 @@ Examples:
 The `credential_tool.py` provides a user-friendly CLI interface to the `CredentialManager`:
 
 **Key Functions:**
-1. **OAuth Setup**: Wraps provider-specific `AuthBase` classes (`GeminiAuthBase`, `QwenAuthBase`, `IFlowAuthBase`) to handle interactive login flows
+1. **OAuth Setup**: Wraps provider-specific `AuthBase` classes (`GeminiAuthBase`, `QwenAuthBase`, `IFlowAuthBase`, `OpenAICodexAuthBase`) to handle interactive login flows
 2. **Credential Export**: Reads local `.json` files and generates `.env` format output for stateless deployment
 3. **API Key Management**: Adds or updates `PROVIDER_API_KEY_N` entries in the `.env` file
 
@@ -1426,12 +1448,13 @@ Each OAuth provider uses a local callback server during authentication. The call
 | Gemini CLI | 8085 | `GEMINI_CLI_OAUTH_PORT` |
 | Antigravity | 51121 | `ANTIGRAVITY_OAUTH_PORT` |
 | iFlow | 11451 | `IFLOW_OAUTH_PORT` |
+| OpenAI Codex | 1455 | `OPENAI_CODEX_OAUTH_PORT` |
 
 **Configuration Methods:**
 
 1. **Via TUI Settings Menu:**
    - Main Menu → `4. View Provider & Advanced Settings` → `1. Launch Settings Tool`
-   - Select the provider (Gemini CLI, Antigravity, or iFlow)
+   - Select the provider (Gemini CLI, Antigravity, iFlow, or OpenAI Codex)
    - Modify the `*_OAUTH_PORT` setting
    - Use "Reset to Default" to restore the original port
 
@@ -1441,6 +1464,7 @@ Each OAuth provider uses a local callback server during authentication. The call
    GEMINI_CLI_OAUTH_PORT=8085
    ANTIGRAVITY_OAUTH_PORT=51121
    IFLOW_OAUTH_PORT=11451
+   OPENAI_CODEX_OAUTH_PORT=1455
    ```
 
 **When to Change Ports:**
@@ -1528,7 +1552,7 @@ The following providers use `TimeoutConfig`:
 | `iflow_provider.py` | `acompletion()` | `streaming()` |
 | `qwen_code_provider.py` | `acompletion()` | `streaming()` |
 
-**Note:** iFlow, Qwen Code, and Gemini CLI providers always use streaming internally (even for non-streaming requests), aggregating chunks into a complete response. Only Antigravity has a true non-streaming path.
+**Note:** iFlow, Qwen Code, Gemini CLI, and OpenAI Codex providers always use streaming internally (even for non-streaming requests), aggregating chunks into a complete response. Only Antigravity has a true non-streaming path.
 
 #### Tuning Recommendations
 
@@ -1649,7 +1673,23 @@ QUOTA_GROUPS_GEMINI_CLI_3_FLASH="gemini-3-flash-preview"
 *   **Schema Cleaning**: Similar to Qwen, it aggressively sanitizes tool schemas to prevent 400 errors.
 *   **Dedicated Logging**: Implements `_IFlowFileLogger` to capture raw chunks for debugging proprietary API behaviors.
 
-### 3.4. Google Gemini (`gemini_provider.py`)
+### 3.4. OpenAI Codex (`openai_codex_provider.py`)
+
+*   **Auth Base**: Uses `OpenAICodexAuthBase` with Authorization Code + PKCE, queue-based refresh/re-auth, and local-first credential persistence (`oauth_creds/openai_codex_oauth_*.json`).
+*   **First-Run Import**: `CredentialManager` imports from `~/.codex/auth.json` and `~/.codex-accounts.json` when no local/OpenAI Codex env creds exist.
+*   **Endpoint Translation**: Implements OpenAI-compatible `/v1/chat/completions` by transforming chat payloads into Codex Responses payloads and calling `POST /codex/responses`.
+*   **SSE Translation**: Maps Codex SSE event families (e.g. `response.output_item.*`, `response.output_text.delta`, `response.function_call_arguments.*`, `response.completed`) into LiteLLM/OpenAI chunk objects.
+*   **Rotation Compatibility**: Emits typed `httpx.HTTPStatusError` for transport/status failures and includes provider-specific `parse_quota_error()` for retry/cooldown extraction (`Retry-After`, `error.resets_at`).
+*   **Default Rotation**: `sequential` (account-level quota behavior).
+
+**OpenAI Codex Troubleshooting Notes:**
+
+- **Malformed JWT payload**: If access/id tokens cannot be decoded, account/email metadata can be missing; re-authenticate to rebuild token metadata.
+- **Missing account-id claim**: Requests require `chatgpt-account-id`; if absent, refresh/re-auth to repopulate `_proxy_metadata.account_id`.
+- **Callback port conflicts**: Change `OPENAI_CODEX_OAUTH_PORT` when port `1455` is already in use.
+- **Header mismatch / 403**: Ensure provider sends `Authorization`, `chatgpt-account-id`, and expected Codex headers (`OpenAI-Beta`, `originator`) when routing to `/codex/responses`.
+
+### 3.5. Google Gemini (`gemini_provider.py`)
 
 *   **Thinking Parameter**: Automatically handles the `thinking` parameter transformation required for Gemini 2.5 models (`thinking` -> `gemini-2.5-pro` reasoning parameter).
 *   **Safety Settings**: Ensures default safety settings (blocking nothing) are applied if not provided, preventing over-sensitive refusals.
