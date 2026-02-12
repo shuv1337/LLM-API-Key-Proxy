@@ -25,3 +25,8 @@ customtkinter
 
 # For building the executable
 pyinstaller
+
+# Test dependencies
+pytest
+pytest-asyncio
+respx

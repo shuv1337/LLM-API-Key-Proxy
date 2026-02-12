@@ -1,0 +1,44 @@
+[
+  {
+    "type": "response.created",
+    "response": {
+      "id": "resp_delta_1",
+      "created_at": 1770927001,
+      "status": "in_progress"
+    }
+  },
+  {
+    "type": "response.output_item.added",
+    "item": {
+      "id": "msg_1",
+      "type": "message",
+      "status": "in_progress",
+      "role": "assistant"
+    }
+  },
+  {
+    "type": "response.content_part.delta",
+    "item_id": "msg_1",
+    "delta": "Hello"
+  },
+  {
+    "type": "response.content_part.delta",
+    "item_id": "msg_1",
+    "delta": " world"
+  },
+  {
+    "type": "response.incomplete",
+    "response": {
+      "id": "resp_delta_1",
+      "status": "incomplete",
+      "incomplete_details": {
+        "reason": "max_output_tokens"
+      },
+      "usage": {
+        "input_tokens": 10,
+        "output_tokens": 20,
+        "total_tokens": 30
+      }
+    }
+  }
+]

@@ -190,6 +190,7 @@ class SettingsDetector:
             "antigravity": "ANTIGRAVITY",
             "qwen_code": "QWEN_CODE",
             "iflow": "IFLOW",
+            "openai_codex": "OPENAI_CODEX",
         }
 
         for provider, env_prefix in env_oauth_providers.items():

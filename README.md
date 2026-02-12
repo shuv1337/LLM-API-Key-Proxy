@@ -105,6 +105,7 @@ anthropic/claude-3-5-sonnet      ← Anthropic API
 openrouter/anthropic/claude-3-opus  ← OpenRouter
 gemini_cli/gemini-2.5-pro        ← Gemini CLI (OAuth)
 antigravity/gemini-3-pro-preview ← Antigravity (Gemini 3, Claude Opus 4.5)
+openai_codex/gpt-5.1-codex       ← OpenAI Codex (ChatGPT OAuth)
 ```
 
 ### Usage Examples
@@ -263,7 +264,7 @@ python -m rotator_library.credential_tool
 | Type | Providers | How to Add |
 |------|-----------|------------|
 | **API Keys** | Gemini, OpenAI, Anthropic, OpenRouter, Groq, Mistral, NVIDIA, Cohere, Chutes | Enter key in TUI or add to `.env` |
-| **OAuth** | Gemini CLI, Antigravity, Qwen Code, iFlow | Interactive browser login via credential tool |
+| **OAuth** | Gemini CLI, Antigravity, Qwen Code, iFlow, OpenAI Codex | Interactive browser login via credential tool |
 
 ### The `.env` File
 
@@ -294,7 +295,7 @@ The proxy is powered by a standalone Python library that you can use directly in
 - **Intelligent key selection** with tiered, model-aware locking
 - **Deadline-driven requests** with configurable global timeout
 - **Automatic failover** between keys on errors
-- **OAuth support** for Gemini CLI, Antigravity, Qwen, iFlow
+- **OAuth support** for Gemini CLI, Antigravity, Qwen, iFlow, OpenAI Codex
 - **Stateless deployment ready** — load credentials from environment variables
 
 ### Basic Usage
@@ -375,7 +376,7 @@ The proxy includes a powerful text-based UI for configuration and management.
 <summary><b>🔑 Credential Management</b></summary>
 
 - **Auto-discovery** of API keys from environment variables
-- **OAuth discovery** from standard paths (`~/.gemini/`, `~/.qwen/`, `~/.iflow/`)
+- **OAuth discovery/import** from standard paths (`~/.gemini/`, `~/.qwen/`, `~/.iflow/`, `~/.codex/`)
 - **Duplicate detection** warns when same account added multiple times
 - **Credential prioritization** — paid tier used before free tier
 - **Stateless deployment** — export OAuth to environment variables
@@ -435,6 +436,13 @@ The proxy includes a powerful text-based UI for configuration and management.
 - Hybrid auth with separate API key fetch
 - Tool schema cleaning
 
+**OpenAI Codex:**
+
+- ChatGPT OAuth Authorization Code + PKCE
+- Codex Responses backend (`/codex/responses`) behind OpenAI-compatible `/v1/chat/completions`
+- First-run import from `~/.codex/auth.json` + `~/.codex-accounts.json`
+- Sequential multi-account rotation + env credential parity (`env://openai_codex/N`)
+
 **NVIDIA NIM:**
 
 - Dynamic model discovery
@@ -449,7 +457,7 @@ The proxy includes a powerful text-based UI for configuration and management.
 - **Unique request directories** with full transaction details
 - **Streaming chunk capture** for debugging
 - **Performance metadata** (duration, tokens, model used)
-- **Provider-specific logs** for Qwen, iFlow, Antigravity
+- **Provider-specific logs** for Qwen, iFlow, Antigravity, OpenAI Codex
 
 </details>
 
@@ -749,6 +757,60 @@ Uses OAuth Authorization Code flow with local callback server.
 </details>
 
 <details>
+<summary><b>OpenAI Codex</b></summary>
+
+Uses ChatGPT OAuth credentials and routes requests to the Codex Responses backend.
+
+**Setup:**
+
+1. Run the credential tool
+2. Select "Add OAuth Credential" → "OpenAI Codex"
+3. Complete browser auth flow (local callback server)
+4. On first run, existing Codex CLI credentials are auto-imported from:
+   - `~/.codex/auth.json`
+   - `~/.codex-accounts.json`
+
+Imported credentials are normalized and stored locally as:
+
+- `oauth_creds/openai_codex_oauth_1.json`
+- `oauth_creds/openai_codex_oauth_2.json`
+- ...
+
+**Features:**
+
+- OAuth Authorization Code + PKCE
+- Automatic refresh + re-auth queueing
+- File-based and stateless env credentials (`env://openai_codex/N`)
+- Sequential rotation by default (`ROTATION_MODE_OPENAI_CODEX=sequential`)
+- OpenAI-compatible `/v1/chat/completions` via Codex Responses backend
+
+**Environment Variables (stateless mode):**
+
+```env
+# Single credential (legacy)
+OPENAI_CODEX_ACCESS_TOKEN="..."
+OPENAI_CODEX_REFRESH_TOKEN="..."
+OPENAI_CODEX_EXPIRY_DATE="1739400000000"
+OPENAI_CODEX_ID_TOKEN="..."
+OPENAI_CODEX_ACCOUNT_ID="acct_..."
+OPENAI_CODEX_EMAIL="user@example.com"
+
+# Numbered multi-credential
+OPENAI_CODEX_1_ACCESS_TOKEN="..."
+OPENAI_CODEX_1_REFRESH_TOKEN="..."
+OPENAI_CODEX_1_EXPIRY_DATE="1739400000000"
+OPENAI_CODEX_1_ID_TOKEN="..."
+OPENAI_CODEX_1_ACCOUNT_ID="acct_..."
+OPENAI_CODEX_1_EMAIL="user1@example.com"
+
+OPENAI_CODEX_API_BASE="https://chatgpt.com/backend-api"
+OPENAI_CODEX_OAUTH_PORT=1455
+ROTATION_MODE_OPENAI_CODEX=sequential
+```
+
+</details>
+
+<details>
 <summary><b>Stateless Deployment (Export to Environment Variables)</b></summary>
 
 For platforms without file persistence (Railway, Render, Vercel):
@@ -779,11 +841,12 @@ For platforms without file persistence (Railway, Render, Vercel):
 
 Customize OAuth callback ports if defaults conflict:
 
-| Provider    | Default Port | Environment Variable     |
-| ----------- | ------------ | ------------------------ |
-| Gemini CLI  | 8085         | `GEMINI_CLI_OAUTH_PORT`  |
-| Antigravity | 51121        | `ANTIGRAVITY_OAUTH_PORT` |
-| iFlow       | 11451        | `IFLOW_OAUTH_PORT`       |
+| Provider     | Default Port | Environment Variable      |
+| ------------ | ------------ | ------------------------- |
+| Gemini CLI   | 8085         | `GEMINI_CLI_OAUTH_PORT`   |
+| Antigravity  | 51121        | `ANTIGRAVITY_OAUTH_PORT`  |
+| iFlow        | 11451        | `IFLOW_OAUTH_PORT`        |
+| OpenAI Codex | 1455         | `OPENAI_CODEX_OAUTH_PORT` |
 
 </details>
 
@@ -958,6 +1021,23 @@ See [VPS Deployment](Deployment%20guide.md#appendix-deploying-to-a-custom-vps) f
 
 ---
 
+## Testing
+
+A lightweight pytest suite is now included under `tests/`.
+
+```bash
+# Install runtime dependencies
+pip install -r requirements.txt
+
+# Optional explicit test dependencies (also safe to run if already included)
+pip install -r requirements-dev.txt
+
+# Run tests
+pytest -q
+```
+
+---
+
 ## Troubleshooting
 
 | Issue | Solution |
@@ -966,7 +1046,7 @@ See [VPS Deployment](Deployment%20guide.md#appendix-deploying-to-a-custom-vps) f
 | `500 Internal Server Error` | Check provider key validity; enable `--enable-request-logging` for details |
 | All keys on cooldown | All keys failed recently; check `logs/detailed_logs/` for upstream errors |
 | Model not found | Verify format is `provider/model_name` (e.g., `gemini/gemini-2.5-flash`) |
-| OAuth callback failed | Ensure callback port (8085, 51121, 11451) isn't blocked by firewall |
+| OAuth callback failed | Ensure callback port (8085, 51121, 11451, 1455) isn't blocked by firewall |
 | Streaming hangs | Increase `TIMEOUT_READ_STREAMING`; check provider status |
 
 **Detailed Logs:**

@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "Unsupported value: 'low' is not supported with the 'gpt-5.1-codex' model. Supported values are: 'medium'.",
+    "type": "invalid_request_error",
+    "param": "text.verbosity",
+    "code": "unsupported_value"
+  }
+}
