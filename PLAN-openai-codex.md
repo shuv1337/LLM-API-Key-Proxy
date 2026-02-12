@@ -76,7 +76,7 @@ Add first-class `openai_codex` support to LLM-API-Key-Proxy with:
 ### 1.1.2 OAuth flow and refresh behavior
 
 - [x] Interactive OAuth with PKCE + state
-  - [x] Local callback: `http://localhost:{OPENAI_CODEX_OAUTH_PORT}/oauth2callback`
+  - [x] Local callback: `http://localhost:{OPENAI_CODEX_OAUTH_PORT}/auth/callback`
   - [x] `ReauthCoordinator` integration (single interactive flow globally)
 - [x] Token exchange endpoint: `https://auth.openai.com/oauth/token`
 - [x] Authorization endpoint: `https://auth.openai.com/oauth/authorize`

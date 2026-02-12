@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from rotator_library.providers.openai_codex_auth_base import OpenAICodexAuthBase
+from rotator_library.providers.openai_codex_auth_base import (
+    CALLBACK_PATH,
+    LEGACY_CALLBACK_PATH,
+    OpenAICodexAuthBase,
+)
 
 
 def _build_jwt(payload: dict) -> str:
@@ -17,6 +21,11 @@ def _build_jwt(payload: dict) -> str:
         return base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
 
     return f"{b64url(header)}.{b64url(payload)}.signature"
+
+
+def test_callback_paths_match_codex_oauth_client_registration():
+    assert CALLBACK_PATH == "/auth/callback"
+    assert LEGACY_CALLBACK_PATH == "/oauth2callback"
 
 
 def test_decode_jwt_helper_valid_token():

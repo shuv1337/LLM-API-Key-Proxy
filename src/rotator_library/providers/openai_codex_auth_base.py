@@ -39,7 +39,10 @@ CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 SCOPE = "openid profile email offline_access"
 AUTHORIZATION_ENDPOINT = "https://auth.openai.com/oauth/authorize"
 TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token"
-CALLBACK_PATH = "/oauth2callback"
+# OpenAI Codex OAuth redirect path registered for this client.
+# Keep legacy `/oauth2callback` handler for backward compatibility with old URLs.
+CALLBACK_PATH = "/auth/callback"
+LEGACY_CALLBACK_PATH = "/oauth2callback"
 CALLBACK_PORT = 1455
 CALLBACK_ENV_VAR = "OPENAI_CODEX_OAUTH_PORT"
 
@@ -97,7 +100,8 @@ class OAuthCallbackServer:
         self.expected_state = expected_state
         self.result_future = asyncio.Future()
 
-        self.app.router.add_get(CALLBACK_PATH, self._handle_callback)
+        for callback_path in {CALLBACK_PATH, LEGACY_CALLBACK_PATH}:
+            self.app.router.add_get(callback_path, self._handle_callback)
 
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
@@ -105,7 +109,9 @@ class OAuthCallbackServer:
         await self.site.start()
 
         lib_logger.debug(
-            f"OpenAI Codex OAuth callback server started on localhost:{self.port}{CALLBACK_PATH}"
+            "OpenAI Codex OAuth callback server started on "
+            f"localhost:{self.port}{CALLBACK_PATH} "
+            f"(legacy alias: {LEGACY_CALLBACK_PATH})"
         )
 
     async def stop(self):
