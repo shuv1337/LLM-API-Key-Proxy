@@ -9,7 +9,7 @@ Captured against `https://chatgpt.com/backend-api/codex/responses` using a valid
 - Authorization code token exchange params:
   - `grant_type=authorization_code`
   - `client_id=app_EMoamEEZ73f0CkXaXp7hrann`
-  - `redirect_uri=http://localhost:<OPENAI_CODEX_OAUTH_PORT>/oauth2callback`
+  - `redirect_uri=http://localhost:<OPENAI_CODEX_OAUTH_PORT>/auth/callback`
   - `code_verifier=<pkce-verifier>`
 - Refresh params:
   - `grant_type=refresh_token`
