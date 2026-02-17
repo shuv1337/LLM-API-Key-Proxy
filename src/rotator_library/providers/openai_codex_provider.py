@@ -812,8 +812,9 @@ class OpenAICodexProvider(OpenAICodexAuthBase, ProviderInterface):
             payload["temperature"] = kwargs["temperature"]
         if kwargs.get("top_p") is not None:
             payload["top_p"] = kwargs["top_p"]
-        if kwargs.get("max_tokens") is not None:
-            payload["max_output_tokens"] = kwargs["max_tokens"]
+        # Note: max_output_tokens is NOT supported by the Codex Responses API
+        # (gpt-5.3-codex returns 400 "Unsupported parameter: max_output_tokens").
+        # Omit it and let the API use its default.
 
         converted_tools = self._convert_tools(kwargs.get("tools"))
         if converted_tools:
