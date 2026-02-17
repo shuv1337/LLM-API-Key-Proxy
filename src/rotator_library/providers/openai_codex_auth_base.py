@@ -278,6 +278,20 @@ class OpenAICodexAuthBase:
         return None
 
     @staticmethod
+    def _extract_explicit_email_from_payload(
+        payload: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """Extract explicit email claim only (no sub fallback)."""
+        if not payload:
+            return None
+
+        email = payload.get("email")
+        if isinstance(email, str) and email.strip():
+            return email.strip()
+
+        return None
+
+    @staticmethod
     def _extract_email_from_payload(payload: Optional[Dict[str, Any]]) -> Optional[str]:
         """Extract email from JWT payload using fallback chain: email -> sub."""
         if not payload:
@@ -315,8 +329,14 @@ class OpenAICodexAuthBase:
         account_id = self._extract_account_id_from_payload(
             access_payload
         ) or self._extract_account_id_from_payload(id_payload)
-        email = self._extract_email_from_payload(access_payload) or self._extract_email_from_payload(
-            id_payload
+
+        # Prefer explicit email claim from id_token first (most user-specific),
+        # then explicit access-token email, then fall back to sub-based extraction.
+        email = (
+            self._extract_explicit_email_from_payload(id_payload)
+            or self._extract_explicit_email_from_payload(access_payload)
+            or self._extract_email_from_payload(id_payload)
+            or self._extract_email_from_payload(access_payload)
         )
 
         if account_id:
@@ -1246,29 +1266,62 @@ class OpenAICodexAuthBase:
         account_id: Optional[str],
         base_dir: Optional[Path] = None,
     ) -> Optional[Path]:
+        """
+        Find an existing local credential to update.
+
+        Matching policy (multi-account safe):
+        - If both email and account_id are available, require BOTH to match.
+        - If one identity field is missing on either side, use the other as a fallback.
+
+        This avoids collisions when different users/accounts share a workspace
+        account_id while keeping backward compatibility for legacy files that may
+        miss one metadata field.
+        """
         if base_dir is None:
             base_dir = self._get_oauth_base_dir()
 
         prefix = self._get_provider_file_prefix()
         pattern = str(base_dir / f"{prefix}_oauth_*.json")
 
+        email_fallback_match: Optional[Path] = None
+        account_fallback_match: Optional[Path] = None
+
         for cred_file in glob(pattern):
             try:
                 with open(cred_file, "r") as f:
                     creds = json.load(f)
+
                 metadata = creds.get("_proxy_metadata", {})
                 existing_email = metadata.get("email")
                 existing_account_id = metadata.get("account_id")
 
-                if email and existing_email and existing_email == email:
+                same_email = (
+                    bool(email)
+                    and bool(existing_email)
+                    and str(existing_email).strip() == str(email).strip()
+                )
+                same_account = (
+                    bool(account_id)
+                    and bool(existing_account_id)
+                    and str(existing_account_id).strip() == str(account_id).strip()
+                )
+
+                # Strongest match: both identifiers present + matching
+                if same_email and same_account:
                     return Path(cred_file)
-                if account_id and existing_account_id and existing_account_id == account_id:
-                    return Path(cred_file)
+
+                # Fallbacks only when one identity dimension is missing
+                if same_email and (not account_id or not existing_account_id):
+                    email_fallback_match = Path(cred_file)
+
+                if same_account and (not email or not existing_email):
+                    account_fallback_match = Path(cred_file)
 
             except Exception:
                 continue
 
-        return None
+        # Prefer email-based fallback over account fallback when both are possible
+        return email_fallback_match or account_fallback_match
 
     def _get_next_credential_number(self, base_dir: Optional[Path] = None) -> int:
         if base_dir is None:

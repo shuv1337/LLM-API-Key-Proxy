@@ -64,6 +64,33 @@ def test_decode_jwt_helper_missing_claims_fallbacks():
     assert account_id is None
 
 
+def test_ensure_proxy_metadata_prefers_id_token_explicit_email():
+    auth = OpenAICodexAuthBase()
+
+    access_payload = {
+        "sub": "workspace-sub-shared",
+        "exp": int(time.time()) + 3600,
+        "https://api.openai.com/auth": {"chatgpt_account_id": "acct_workspace"},
+    }
+    id_payload = {
+        "email": "real-user@example.com",
+        "sub": "user-sub-123",
+        "exp": int(time.time()) + 3600,
+        "https://api.openai.com/auth": {"chatgpt_account_id": "acct_workspace"},
+    }
+
+    creds = {
+        "access_token": _build_jwt(access_payload),
+        "id_token": _build_jwt(id_payload),
+        "refresh_token": "rt_test",
+    }
+
+    auth._ensure_proxy_metadata(creds)
+
+    assert creds["_proxy_metadata"]["email"] == "real-user@example.com"
+    assert creds["_proxy_metadata"]["account_id"] == "acct_workspace"
+
+
 def test_expiry_logic_with_proactive_buffer_and_true_expiry():
     auth = OpenAICodexAuthBase()
 
@@ -185,3 +212,168 @@ async def test_is_credential_available_reauth_queue_and_ttl_cleanup():
 
     # let background queue task schedule to avoid un-awaited coroutine warnings
     await asyncio.sleep(0)
+
+
+def test_find_existing_credential_identity_allows_same_email_different_account(tmp_path: Path):
+    auth = OpenAICodexAuthBase()
+
+    existing = tmp_path / "openai_codex_oauth_1.json"
+    existing.write_text(
+        json.dumps(
+            {
+                "_proxy_metadata": {
+                    "email": "shared@example.com",
+                    "account_id": "acct_original",
+                }
+            }
+        )
+    )
+
+    # Different account_id with same email should NOT be treated as an update target.
+    match = auth._find_existing_credential_by_identity(
+        email="shared@example.com",
+        account_id="acct_new",
+        base_dir=tmp_path,
+    )
+    assert match is None
+
+    # Exact account_id + email should still match.
+    match_same_identity = auth._find_existing_credential_by_identity(
+        email="shared@example.com",
+        account_id="acct_original",
+        base_dir=tmp_path,
+    )
+    assert match_same_identity == existing
+
+    # Email fallback should work when account_id is unknown.
+    match_email_fallback = auth._find_existing_credential_by_identity(
+        email="shared@example.com",
+        account_id=None,
+        base_dir=tmp_path,
+    )
+    assert match_email_fallback == existing
+
+
+def test_find_existing_credential_identity_allows_same_account_different_email(tmp_path: Path):
+    auth = OpenAICodexAuthBase()
+
+    existing = tmp_path / "openai_codex_oauth_1.json"
+    existing.write_text(
+        json.dumps(
+            {
+                "_proxy_metadata": {
+                    "email": "first@example.com",
+                    "account_id": "acct_workspace",
+                }
+            }
+        )
+    )
+
+    # Same account_id but different email should not auto-update when both
+    # identifiers are available (prevents workspace-level collisions).
+    match = auth._find_existing_credential_by_identity(
+        email="second@example.com",
+        account_id="acct_workspace",
+        base_dir=tmp_path,
+    )
+    assert match is None
+
+
+@pytest.mark.asyncio
+async def test_setup_credential_creates_new_file_for_same_email_new_account(tmp_path: Path):
+    auth = OpenAICodexAuthBase()
+
+    existing = tmp_path / "openai_codex_oauth_1.json"
+    existing.write_text(
+        json.dumps(
+            {
+                "access_token": "old_access",
+                "refresh_token": "old_refresh",
+                "expiry_date": int((time.time() + 3600) * 1000),
+                "token_uri": "https://auth.openai.com/oauth/token",
+                "_proxy_metadata": {
+                    "email": "shared@example.com",
+                    "account_id": "acct_original",
+                    "loaded_from_env": False,
+                    "env_credential_index": None,
+                },
+            }
+        )
+    )
+
+    async def fake_initialize_token(_creds):
+        return {
+            "access_token": "new_access",
+            "refresh_token": "new_refresh",
+            "id_token": "new_id",
+            "expiry_date": int((time.time() + 3600) * 1000),
+            "token_uri": "https://auth.openai.com/oauth/token",
+            "_proxy_metadata": {
+                "email": "shared@example.com",
+                "account_id": "acct_new",
+                "loaded_from_env": False,
+                "env_credential_index": None,
+            },
+        }
+
+    auth.initialize_token = fake_initialize_token
+
+    result = await auth.setup_credential(base_dir=tmp_path)
+
+    assert result.success is True
+    assert result.is_update is False
+    assert result.file_path is not None
+    assert result.file_path.endswith("openai_codex_oauth_2.json")
+
+    files = sorted(p.name for p in tmp_path.glob("openai_codex_oauth_*.json"))
+    assert files == ["openai_codex_oauth_1.json", "openai_codex_oauth_2.json"]
+
+
+@pytest.mark.asyncio
+async def test_setup_credential_creates_new_file_for_same_account_new_email(tmp_path: Path):
+    auth = OpenAICodexAuthBase()
+
+    existing = tmp_path / "openai_codex_oauth_1.json"
+    existing.write_text(
+        json.dumps(
+            {
+                "access_token": "old_access",
+                "refresh_token": "old_refresh",
+                "expiry_date": int((time.time() + 3600) * 1000),
+                "token_uri": "https://auth.openai.com/oauth/token",
+                "_proxy_metadata": {
+                    "email": "first@example.com",
+                    "account_id": "acct_workspace",
+                    "loaded_from_env": False,
+                    "env_credential_index": None,
+                },
+            }
+        )
+    )
+
+    async def fake_initialize_token(_creds):
+        return {
+            "access_token": "new_access",
+            "refresh_token": "new_refresh",
+            "id_token": "new_id",
+            "expiry_date": int((time.time() + 3600) * 1000),
+            "token_uri": "https://auth.openai.com/oauth/token",
+            "_proxy_metadata": {
+                "email": "second@example.com",
+                "account_id": "acct_workspace",
+                "loaded_from_env": False,
+                "env_credential_index": None,
+            },
+        }
+
+    auth.initialize_token = fake_initialize_token
+
+    result = await auth.setup_credential(base_dir=tmp_path)
+
+    assert result.success is True
+    assert result.is_update is False
+    assert result.file_path is not None
+    assert result.file_path.endswith("openai_codex_oauth_2.json")
+
+    files = sorted(p.name for p in tmp_path.glob("openai_codex_oauth_*.json"))
+    assert files == ["openai_codex_oauth_1.json", "openai_codex_oauth_2.json"]
