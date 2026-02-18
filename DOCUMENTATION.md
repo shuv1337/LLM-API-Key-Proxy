@@ -1676,6 +1676,7 @@ QUOTA_GROUPS_GEMINI_CLI_3_FLASH="gemini-3-flash-preview"
 ### 3.4. OpenAI Codex (`openai_codex_provider.py`)
 
 *   **Auth Base**: Uses `OpenAICodexAuthBase` with Authorization Code + PKCE, queue-based refresh/re-auth, and local-first credential persistence (`oauth_creds/openai_codex_oauth_*.json`).
+*   **OAuth Client ID**: Uses OpenAI's public Codex OAuth client ID. This value is intentionally non-secret (OAuth client IDs identify the app, unlike client secrets).
 *   **First-Run Import**: `CredentialManager` imports from `~/.codex/auth.json` and `~/.codex-accounts.json` when no local/OpenAI Codex env creds exist.
 *   **Endpoint Translation**: Implements OpenAI-compatible `/v1/chat/completions` by transforming chat payloads into Codex Responses payloads and calling `POST /codex/responses`.
 *   **SSE Translation**: Maps Codex SSE event families (e.g. `response.output_item.*`, `response.output_text.delta`, `response.function_call_arguments.*`, `response.completed`) into LiteLLM/OpenAI chunk objects.

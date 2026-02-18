@@ -5,12 +5,17 @@ import os
 import re
 import json
 import time
-import base64
 import shutil
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Union, Any, Tuple
 
+from .utils.openai_codex_jwt import (
+    decode_jwt_unverified,
+    extract_account_id_from_payload,
+    extract_email_from_payload,
+    extract_expiry_ms_from_payload,
+)
 from .utils.paths import get_oauth_dir
 
 lib_logger = logging.getLogger("rotator_library")
@@ -129,26 +134,11 @@ class CredentialManager:
     # OpenAI Codex first-run import helpers
     # -------------------------------------------------------------------------
 
-    def _decode_jwt_unverified(self, token: str) -> Optional[Dict[str, Any]]:
-        """Decode JWT payload without signature verification."""
-        if not token or not isinstance(token, str):
-            return None
-
-        parts = token.split(".")
-        if len(parts) < 2:
-            return None
-
-        payload = parts[1]
-        payload += "=" * (-len(payload) % 4)
-
-        try:
-            decoded = base64.urlsafe_b64decode(payload)
-            data = json.loads(decoded.decode("utf-8"))
-            return data if isinstance(data, dict) else None
-        except Exception:
-            return None
-
-    def _extract_codex_identity(self, access_token: str, id_token: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[int]]:
+    def _extract_codex_identity(
+        self,
+        access_token: str,
+        id_token: Optional[str],
+    ) -> Tuple[Optional[str], Optional[str], Optional[int]]:
         """
         Extract (account_id, email, exp_ms) from Codex JWTs.
 
@@ -157,56 +147,16 @@ class CredentialManager:
         - email: id_token -> access_token
         - exp: access_token -> id_token
         """
+        access_payload = decode_jwt_unverified(access_token)
+        id_payload = decode_jwt_unverified(id_token) if id_token else None
 
-        def extract_account(payload: Optional[Dict[str, Any]]) -> Optional[str]:
-            if not payload:
-                return None
-
-            direct = payload.get("https://api.openai.com/auth.chatgpt_account_id")
-            if isinstance(direct, str) and direct.strip():
-                return direct.strip()
-
-            auth_claim = payload.get("https://api.openai.com/auth")
-            if isinstance(auth_claim, dict):
-                nested = auth_claim.get("chatgpt_account_id")
-                if isinstance(nested, str) and nested.strip():
-                    return nested.strip()
-
-            orgs = payload.get("organizations")
-            if isinstance(orgs, list) and orgs:
-                first = orgs[0]
-                if isinstance(first, dict):
-                    org_id = first.get("id")
-                    if isinstance(org_id, str) and org_id.strip():
-                        return org_id.strip()
-
-            return None
-
-        def extract_email(payload: Optional[Dict[str, Any]]) -> Optional[str]:
-            if not payload:
-                return None
-            email = payload.get("email")
-            if isinstance(email, str) and email.strip():
-                return email.strip()
-            sub = payload.get("sub")
-            if isinstance(sub, str) and sub.strip():
-                return sub.strip()
-            return None
-
-        def extract_exp_ms(payload: Optional[Dict[str, Any]]) -> Optional[int]:
-            if not payload:
-                return None
-            exp = payload.get("exp")
-            if isinstance(exp, (int, float)):
-                return int(float(exp) * 1000)
-            return None
-
-        access_payload = self._decode_jwt_unverified(access_token)
-        id_payload = self._decode_jwt_unverified(id_token) if id_token else None
-
-        account_id = extract_account(access_payload) or extract_account(id_payload)
-        email = extract_email(id_payload) or extract_email(access_payload)
-        exp_ms = extract_exp_ms(access_payload) or extract_exp_ms(id_payload)
+        account_id = extract_account_id_from_payload(access_payload) or extract_account_id_from_payload(
+            id_payload
+        )
+        email = extract_email_from_payload(id_payload) or extract_email_from_payload(access_payload)
+        exp_ms = extract_expiry_ms_from_payload(access_payload) or extract_expiry_ms_from_payload(
+            id_payload
+        )
 
         return account_id, email, exp_ms
 
@@ -290,6 +240,34 @@ class CredentialManager:
             },
         }
 
+    def _dedupe_openai_codex_records(
+        self,
+        records: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Deduplicate normalized Codex credential records by account/email identity."""
+        unique: List[Dict[str, Any]] = []
+        seen_account_ids: Set[str] = set()
+        seen_emails: Set[str] = set()
+
+        for record in records:
+            metadata = record.get("_proxy_metadata", {})
+            account_id = metadata.get("account_id")
+            email = metadata.get("email")
+
+            if isinstance(account_id, str) and account_id:
+                if account_id in seen_account_ids:
+                    continue
+                seen_account_ids.add(account_id)
+
+            if isinstance(email, str) and email:
+                if email in seen_emails:
+                    continue
+                seen_emails.add(email)
+
+            unique.append(record)
+
+        return unique
+
     def _import_openai_codex_cli_credentials(
         self,
         auth_json_path: Optional[Path] = None,
@@ -372,30 +350,10 @@ class CredentialManager:
         if not normalized_records:
             return []
 
-        # Deduplicate by account_id first, then email
-        unique: List[Dict[str, Any]] = []
-        seen_account_ids: Set[str] = set()
-        seen_emails: Set[str] = set()
-
-        for record in normalized_records:
-            metadata = record.get("_proxy_metadata", {})
-            account_id = metadata.get("account_id")
-            email = metadata.get("email")
-
-            if isinstance(account_id, str) and account_id:
-                if account_id in seen_account_ids:
-                    continue
-                seen_account_ids.add(account_id)
-
-            if isinstance(email, str) and email:
-                if email in seen_emails:
-                    continue
-                seen_emails.add(email)
-
-            unique.append(record)
+        deduped_records = self._dedupe_openai_codex_records(normalized_records)
 
         imported_paths: List[str] = []
-        for i, record in enumerate(unique, 1):
+        for i, record in enumerate(deduped_records, 1):
             local_path = self.oauth_base_dir / f"openai_codex_oauth_{i}.json"
             try:
                 with open(local_path, "w") as f:
@@ -496,33 +454,13 @@ class CredentialManager:
             # Unknown shape: preserve existing behavior (copy as-is)
             passthrough_paths.append(source_path)
 
-        # Deduplicate normalized records by account_id/email
-        unique_records: List[Dict[str, Any]] = []
-        seen_account_ids: Set[str] = set()
-        seen_emails: Set[str] = set()
-
-        for record in normalized_records:
-            metadata = record.get("_proxy_metadata", {})
-            account_id = metadata.get("account_id")
-            email = metadata.get("email")
-
-            if isinstance(account_id, str) and account_id:
-                if account_id in seen_account_ids:
-                    continue
-                seen_account_ids.add(account_id)
-
-            if isinstance(email, str) and email:
-                if email in seen_emails:
-                    continue
-                seen_emails.add(email)
-
-            unique_records.append(record)
+        deduped_records = self._dedupe_openai_codex_records(normalized_records)
 
         imported_paths: List[str] = []
         next_index = 1
 
         # Write normalized records first
-        for record in unique_records:
+        for record in deduped_records:
             local_path = self.oauth_base_dir / f"openai_codex_oauth_{next_index}.json"
             try:
                 with open(local_path, "w") as f:

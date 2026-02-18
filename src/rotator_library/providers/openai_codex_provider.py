@@ -7,6 +7,7 @@ import copy
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,19 @@ HARDCODED_MODELS = [
     "gpt-5.1-codex-mini",
     "gpt-5-codex",
 ]
+
+RATE_LIMIT_CODE_PATTERN = re.compile(
+    r"^(rate[_-]?limit(?:ed)?|usage[_-]?limit(?:[_-](?:reached|exceeded))?|quota(?:[_-](?:reached|exceeded))?|insufficient_quota)$",
+    re.IGNORECASE,
+)
+RATE_LIMIT_TYPE_PATTERN = re.compile(
+    r"^(rate[_-]?limit(?:_error)?)$",
+    re.IGNORECASE,
+)
+RATE_LIMIT_MESSAGE_PATTERN = re.compile(
+    r"\b(rate\s*limit(?:ed)?|too\s+many\s+requests|usage\s+limit\s+(?:reached|exceeded)|quota\s+(?:is\s+)?(?:reached|exceeded))\b",
+    re.IGNORECASE,
+)
 
 
 class CodexStreamError(Exception):
@@ -377,13 +391,17 @@ class OpenAICodexProvider(OpenAICodexAuthBase, ProviderInterface):
         "default": UsageResetConfigDef(
             window_seconds=24 * 60 * 60,
             mode="credential",
-            description="TODO: tune OpenAI Codex quota window from observed behavior",
+            description=(
+                "MVP fallback window. Tune from production telemetry "
+                "(tracked in PLAN-openai-codex.md §6)."
+            ),
             field_name="daily",
         )
     }
 
     model_quota_groups: QuotaGroupMap = {
-        # TODO: tune once quota sharing behavior is empirically validated
+        # Intentionally empty for MVP. Shared quota groups will be added after
+        # telemetry validation (tracked in PLAN-openai-codex.md §6).
     }
 
     def __init__(self):
@@ -1138,6 +1156,7 @@ class OpenAICodexProvider(OpenAICodexAuthBase, ProviderInterface):
         if isinstance(error, httpx.HTTPStatusError):
             response = error.response
 
+        status_code = response.status_code if response is not None else None
         headers = response.headers if response is not None else {}
 
         retry_after: Optional[int] = None
@@ -1183,10 +1202,23 @@ class OpenAICodexProvider(OpenAICodexAuthBase, ProviderInterface):
 
         err = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
 
-        code = str(err.get("code", "") or "").lower()
-        err_type = str(err.get("type", "") or "").lower()
-        message = str(err.get("message", "") or "").lower()
-        combined = " ".join([code, err_type, message])
+        code_raw = str(err.get("code", "") or "")
+        err_type_raw = str(err.get("type", "") or "")
+        message_raw = str(err.get("message", "") or "")
+
+        code = code_raw.lower()
+        err_type = err_type_raw.lower()
+
+        def _looks_like_rate_limit() -> bool:
+            if status_code == 429:
+                return True
+            if code and RATE_LIMIT_CODE_PATTERN.match(code):
+                return True
+            if err_type and RATE_LIMIT_TYPE_PATTERN.match(err_type):
+                return True
+            if message_raw and RATE_LIMIT_MESSAGE_PATTERN.search(message_raw):
+                return True
+            return False
 
         # Look for codex-specific reset timestamp
         reset_ts = err.get("resets_at")
@@ -1213,9 +1245,7 @@ class OpenAICodexProvider(OpenAICodexAuthBase, ProviderInterface):
                     except ValueError:
                         continue
 
-        if retry_after is None and any(
-            token in combined for token in ["usage_limit", "rate_limit", "quota"]
-        ):
+        if retry_after is None and _looks_like_rate_limit():
             retry_after = 60
 
         if retry_after is None:

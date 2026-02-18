@@ -784,6 +784,7 @@ Imported credentials are normalized and stored locally as:
 **Features:**
 
 - OAuth Authorization Code + PKCE
+- Uses OpenAI's public Codex OAuth client ID (non-secret by OAuth design)
 - Automatic refresh + re-auth queueing
 - File-based and stateless env credentials (`env://openai_codex/N`)
 - Sequential rotation by default (`ROTATION_MODE_OPENAI_CODEX=sequential`)

@@ -130,7 +130,7 @@ def test_chat_request_mapping_to_codex_payload(provider: OpenAICodexProvider):
     assert payload["input"][0]["role"] == "user"
     assert payload["temperature"] == 0.2
     assert payload["top_p"] == 0.9
-    assert payload["max_output_tokens"] == 123
+    assert "max_output_tokens" not in payload
     assert payload["tool_choice"] == "auto"
     assert payload["tools"][0]["name"] == "lookup"
 
@@ -260,3 +260,25 @@ def test_parse_quota_error_from_resets_at_field(provider: OpenAICodexProvider):
     assert parsed["quota_reset_timestamp"] == float(reset_ts)
     assert isinstance(parsed["retry_after"], int)
     assert parsed["retry_after"] >= 1
+
+
+def test_parse_quota_error_does_not_match_generic_quota_substrings(
+    provider: OpenAICodexProvider,
+):
+    request = httpx.Request("POST", "https://chatgpt.com/backend-api/codex/responses")
+    response = httpx.Response(
+        status_code=400,
+        request=request,
+        text=json.dumps(
+            {
+                "error": {
+                    "code": "invalid_request_error",
+                    "message": "quota project ID is invalid",
+                }
+            }
+        ),
+    )
+    error = httpx.HTTPStatusError("Bad request", request=request, response=response)
+
+    parsed = provider.parse_quota_error(error)
+    assert parsed is None

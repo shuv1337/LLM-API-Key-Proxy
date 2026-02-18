@@ -20,6 +20,15 @@ from .resilient_io import (
     safe_read_json,
     safe_mkdir,
 )
+from .openai_codex_jwt import (
+    AUTH_CLAIM,
+    ACCOUNT_ID_CLAIM,
+    decode_jwt_unverified,
+    extract_account_id_from_payload,
+    extract_explicit_email_from_payload,
+    extract_email_from_payload,
+    extract_expiry_ms_from_payload,
+)
 from .suppress_litellm_warnings import suppress_litellm_serialization_warnings
 
 __all__ = [
@@ -37,5 +46,12 @@ __all__ = [
     "safe_log_write",
     "safe_read_json",
     "safe_mkdir",
+    "AUTH_CLAIM",
+    "ACCOUNT_ID_CLAIM",
+    "decode_jwt_unverified",
+    "extract_account_id_from_payload",
+    "extract_explicit_email_from_payload",
+    "extract_email_from_payload",
+    "extract_expiry_ms_from_payload",
     "suppress_litellm_serialization_warnings",
 ]

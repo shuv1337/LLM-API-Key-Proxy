@@ -17,7 +17,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from glob import glob
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlencode
 
 import httpx
@@ -29,12 +29,23 @@ from rich.text import Text
 
 from ..error_handler import CredentialNeedsReauthError
 from ..utils.headless_detection import is_headless_environment
+from ..utils.openai_codex_jwt import (
+    ACCOUNT_ID_CLAIM,
+    AUTH_CLAIM,
+    decode_jwt_unverified,
+    extract_account_id_from_payload,
+    extract_email_from_payload,
+    extract_expiry_ms_from_payload,
+    extract_explicit_email_from_payload,
+)
 from ..utils.reauth_coordinator import get_reauth_coordinator
 from ..utils.resilient_io import safe_write_json
 
 lib_logger = logging.getLogger("rotator_library")
 
 # OAuth constants
+# Public OAuth client id used by the official Codex CLI/browser flow.
+# OAuth client IDs identify the app and are intentionally non-secret.
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 SCOPE = "openid profile email offline_access"
 AUTHORIZATION_ENDPOINT = "https://auth.openai.com/oauth/authorize"
@@ -50,12 +61,13 @@ CALLBACK_ENV_VAR = "OPENAI_CODEX_OAUTH_PORT"
 DEFAULT_API_BASE = "https://chatgpt.com/backend-api"
 RESPONSES_ENDPOINT_PATH = "/codex/responses"
 
-# JWT claims
-AUTH_CLAIM = "https://api.openai.com/auth"
-ACCOUNT_ID_CLAIM = "https://api.openai.com/auth.chatgpt_account_id"
-
 # Refresh when token is close to expiry
 REFRESH_EXPIRY_BUFFER_SECONDS = 5 * 60  # 5 minutes
+
+INVALID_GRANT_PATTERN = re.compile(
+    r"\binvalid[_\s-]?grant\b|\bgrant\s+is\s+invalid\b|\brefresh\s+token\s+(?:is\s+)?(?:invalid|expired|revoked)\b",
+    re.IGNORECASE,
+)
 
 console = Console()
 
@@ -218,6 +230,9 @@ class OpenAICodexAuthBase:
 
         self._queue_retry_count: Dict[str, int] = {}
 
+        # Track background tasks spawned from sync contexts so exceptions are not dropped.
+        self._background_tasks: set[asyncio.Task] = set()
+
         # Queue configuration
         self._refresh_timeout_seconds: int = 20
         self._refresh_interval_seconds: int = 20
@@ -231,93 +246,29 @@ class OpenAICodexAuthBase:
     @staticmethod
     def _decode_jwt_unverified(token: str) -> Optional[Dict[str, Any]]:
         """Decode JWT payload without signature verification."""
-        if not token or not isinstance(token, str):
-            return None
-
-        parts = token.split(".")
-        if len(parts) < 2:
-            return None
-
-        payload_segment = parts[1]
-        padding = "=" * (-len(payload_segment) % 4)
-
-        try:
-            payload_bytes = base64.urlsafe_b64decode(payload_segment + padding)
-            payload = json.loads(payload_bytes.decode("utf-8"))
-            return payload if isinstance(payload, dict) else None
-        except Exception:
-            return None
+        return decode_jwt_unverified(token)
 
     @staticmethod
     def _extract_account_id_from_payload(payload: Optional[Dict[str, Any]]) -> Optional[str]:
         """Extract account ID from JWT claims."""
-        if not payload:
-            return None
-
-        # 1) Direct dotted claim format (requested by plan)
-        direct = payload.get(ACCOUNT_ID_CLAIM)
-        if isinstance(direct, str) and direct.strip():
-            return direct.strip()
-
-        # 2) Nested object claim format observed in real tokens
-        auth_claim = payload.get(AUTH_CLAIM)
-        if isinstance(auth_claim, dict):
-            nested = auth_claim.get("chatgpt_account_id")
-            if isinstance(nested, str) and nested.strip():
-                return nested.strip()
-
-        # 3) Fallback organizations[0].id if present
-        orgs = payload.get("organizations")
-        if isinstance(orgs, list) and orgs:
-            first = orgs[0]
-            if isinstance(first, dict):
-                org_id = first.get("id")
-                if isinstance(org_id, str) and org_id.strip():
-                    return org_id.strip()
-
-        return None
+        return extract_account_id_from_payload(payload)
 
     @staticmethod
     def _extract_explicit_email_from_payload(
         payload: Optional[Dict[str, Any]],
     ) -> Optional[str]:
         """Extract explicit email claim only (no sub fallback)."""
-        if not payload:
-            return None
-
-        email = payload.get("email")
-        if isinstance(email, str) and email.strip():
-            return email.strip()
-
-        return None
+        return extract_explicit_email_from_payload(payload)
 
     @staticmethod
     def _extract_email_from_payload(payload: Optional[Dict[str, Any]]) -> Optional[str]:
         """Extract email from JWT payload using fallback chain: email -> sub."""
-        if not payload:
-            return None
-
-        email = payload.get("email")
-        if isinstance(email, str) and email.strip():
-            return email.strip()
-
-        sub = payload.get("sub")
-        if isinstance(sub, str) and sub.strip():
-            return sub.strip()
-
-        return None
+        return extract_email_from_payload(payload)
 
     @staticmethod
     def _extract_expiry_ms_from_payload(payload: Optional[Dict[str, Any]]) -> Optional[int]:
         """Extract JWT exp claim and convert to milliseconds."""
-        if not payload:
-            return None
-
-        exp = payload.get("exp")
-        if isinstance(exp, (int, float)):
-            return int(float(exp) * 1000)
-
-        return None
+        return extract_expiry_ms_from_payload(payload)
 
     def _populate_metadata_from_tokens(self, creds: Dict[str, Any]) -> None:
         """Populate _proxy_metadata (email/account_id) from access_token or id_token."""
@@ -572,6 +523,26 @@ class OpenAICodexAuthBase:
         expiry_timestamp = float(creds.get("expiry_date", 0)) / 1000
         return expiry_timestamp < time.time()
 
+    @staticmethod
+    def _is_invalid_grant_error(error_type: str, error_desc: str) -> bool:
+        """Detect invalid/revoked refresh-token errors with specific matching."""
+        if str(error_type).strip().lower() == "invalid_grant":
+            return True
+
+        if not isinstance(error_desc, str) or not error_desc.strip():
+            return False
+
+        return bool(INVALID_GRANT_PATTERN.search(error_desc))
+
+    async def _queue_reauth_request(self, path: str) -> None:
+        """Queue interactive re-auth, logging queueing failures explicitly."""
+        try:
+            await self._queue_refresh(path, force=True, needs_reauth=True)
+        except Exception as queue_error:
+            lib_logger.error(
+                f"Failed to queue OpenAI Codex re-auth for '{Path(path).name}': {queue_error}"
+            )
+
     async def _exchange_code_for_tokens(
         self, code: str, code_verifier: str, redirect_uri: str
     ) -> Dict[str, Any]:
@@ -666,14 +637,8 @@ class OpenAICodexAuthBase:
 
                         # invalid_grant and authorization failures should trigger re-auth queue
                         if status_code == 400:
-                            if (
-                                error_type == "invalid_grant"
-                                or "invalid_grant" in error_desc.lower()
-                                or "invalid" in error_desc.lower()
-                            ):
-                                asyncio.create_task(
-                                    self._queue_refresh(path, force=True, needs_reauth=True)
-                                )
+                            if self._is_invalid_grant_error(error_type, error_desc):
+                                await self._queue_reauth_request(path)
                                 raise CredentialNeedsReauthError(
                                     credential_path=path,
                                     message=(
@@ -683,9 +648,7 @@ class OpenAICodexAuthBase:
                             raise
 
                         if status_code in (401, 403):
-                            asyncio.create_task(
-                                self._queue_refresh(path, force=True, needs_reauth=True)
-                            )
+                            await self._queue_reauth_request(path)
                             raise CredentialNeedsReauthError(
                                 credential_path=path,
                                 message=(
@@ -1032,6 +995,48 @@ class OpenAICodexAuthBase:
                 self._refresh_locks[path] = asyncio.Lock()
             return self._refresh_locks[path]
 
+    def _track_background_task(
+        self,
+        task: asyncio.Task,
+        *,
+        description: str,
+    ) -> asyncio.Task:
+        """Track a background task and surface exceptions in logs."""
+        self._background_tasks.add(task)
+
+        def _on_done(done_task: asyncio.Task):
+            self._background_tasks.discard(done_task)
+            if done_task.cancelled():
+                return
+
+            try:
+                exc = done_task.exception()
+            except Exception:
+                return
+
+            if exc is not None:
+                lib_logger.error(
+                    f"OpenAI Codex background task failed ({description}): {exc}"
+                )
+
+        task.add_done_callback(_on_done)
+        return task
+
+    def _spawn_background_task(
+        self,
+        coro: Awaitable[Any],
+        *,
+        description: str,
+    ) -> Optional[asyncio.Task]:
+        """Create a tracked task from sync contexts when an event loop is available."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
+        task = loop.create_task(coro)
+        return self._track_background_task(task, description=description)
+
     def is_credential_available(self, path: str) -> bool:
         """
         Check if credential is available for rotation.
@@ -1056,12 +1061,11 @@ class OpenAICodexAuthBase:
         creds = self._credentials_cache.get(path)
         if creds and self._is_token_truly_expired(creds):
             if path not in self._queued_credentials:
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(
-                        self._queue_refresh(path, force=True, needs_reauth=False)
-                    )
-                except RuntimeError:
+                task = self._spawn_background_task(
+                    self._queue_refresh(path, force=True, needs_reauth=False),
+                    description=f"queue refresh for {Path(path).name}",
+                )
+                if task is None:
                     # No running event loop (e.g., sync context); caller can still
                     # trigger refresh through normal async request flow.
                     pass
@@ -1071,11 +1075,19 @@ class OpenAICodexAuthBase:
 
     async def _ensure_queue_processor_running(self):
         if self._queue_processor_task is None or self._queue_processor_task.done():
-            self._queue_processor_task = asyncio.create_task(self._process_refresh_queue())
+            task = asyncio.create_task(self._process_refresh_queue())
+            self._queue_processor_task = self._track_background_task(
+                task,
+                description="refresh queue processor",
+            )
 
     async def _ensure_reauth_processor_running(self):
         if self._reauth_processor_task is None or self._reauth_processor_task.done():
-            self._reauth_processor_task = asyncio.create_task(self._process_reauth_queue())
+            task = asyncio.create_task(self._process_reauth_queue())
+            self._reauth_processor_task = self._track_background_task(
+                task,
+                description="reauth queue processor",
+            )
 
     async def _queue_refresh(
         self,
@@ -1144,11 +1156,7 @@ class OpenAICodexAuthBase:
                                 error_type = ""
                                 error_desc = str(e)
 
-                            if (
-                                error_type == "invalid_grant"
-                                or "invalid_grant" in error_desc.lower()
-                                or "invalid" in error_desc.lower()
-                            ):
+                            if self._is_invalid_grant_error(error_type, error_desc):
                                 needs_reauth = True
 
                         elif status_code in (401, 403):

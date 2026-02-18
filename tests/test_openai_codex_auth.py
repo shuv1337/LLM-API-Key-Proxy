@@ -4,11 +4,15 @@ import json
 import time
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 
+from rotator_library.error_handler import CredentialNeedsReauthError
 from rotator_library.providers.openai_codex_auth_base import (
     CALLBACK_PATH,
     LEGACY_CALLBACK_PATH,
+    TOKEN_ENDPOINT,
     OpenAICodexAuthBase,
 )
 
@@ -377,3 +381,81 @@ async def test_setup_credential_creates_new_file_for_same_account_new_email(tmp_
 
     files = sorted(p.name for p in tmp_path.glob("openai_codex_oauth_*.json"))
     assert files == ["openai_codex_oauth_1.json", "openai_codex_oauth_2.json"]
+
+
+@pytest.mark.asyncio
+async def test_queue_refresh_deduplicates_under_concurrency(monkeypatch):
+    auth = OpenAICodexAuthBase()
+    path = "/tmp/openai_codex_oauth_1.json"
+
+    async def no_op_queue_processor_start():
+        return None
+
+    monkeypatch.setattr(auth, "_ensure_queue_processor_running", no_op_queue_processor_start)
+
+    await asyncio.gather(
+        *[
+            auth._queue_refresh(path, force=False, needs_reauth=False)
+            for _ in range(25)
+        ]
+    )
+
+    assert auth._refresh_queue.qsize() == 1
+
+    queued_path, queued_force = await auth._refresh_queue.get()
+    assert queued_path == path
+    assert queued_force is False
+    auth._refresh_queue.task_done()
+
+
+@pytest.mark.asyncio
+async def test_refresh_invalid_grant_queues_reauth_sync(tmp_path: Path, monkeypatch):
+    auth = OpenAICodexAuthBase()
+    cred_path = tmp_path / "openai_codex_oauth_1.json"
+
+    payload = {
+        "sub": "refresh-user",
+        "exp": int(time.time()) + 3600,
+        "https://api.openai.com/auth": {"chatgpt_account_id": "acct_refresh"},
+    }
+
+    cred_path.write_text(
+        json.dumps(
+            {
+                "access_token": _build_jwt(payload),
+                "refresh_token": "rt_refresh",
+                "id_token": _build_jwt(payload),
+                "expiry_date": int((time.time() - 60) * 1000),
+                "token_uri": "https://auth.openai.com/oauth/token",
+                "_proxy_metadata": {
+                    "email": "refresh@example.com",
+                    "account_id": "acct_refresh",
+                    "loaded_from_env": False,
+                    "env_credential_index": None,
+                },
+            }
+        )
+    )
+
+    queued: list[tuple[str, bool, bool]] = []
+
+    async def capture_queue_refresh(path_arg: str, force: bool = False, needs_reauth: bool = False):
+        queued.append((path_arg, force, needs_reauth))
+
+    monkeypatch.setattr(auth, "_queue_refresh", capture_queue_refresh)
+
+    with respx.mock(assert_all_called=True) as mock_router:
+        mock_router.post(TOKEN_ENDPOINT).mock(
+            return_value=httpx.Response(
+                status_code=400,
+                json={
+                    "error": "invalid_grant",
+                    "error_description": "refresh token revoked",
+                },
+            )
+        )
+
+        with pytest.raises(CredentialNeedsReauthError):
+            await auth._refresh_token(str(cred_path), force=True)
+
+    assert queued == [(str(cred_path), True, True)]
