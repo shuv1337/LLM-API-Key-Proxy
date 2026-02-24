@@ -254,7 +254,10 @@ class RotatingClient:
             provider_instances=self._provider_instances,
         )
 
-        self._model_list_cache: Dict[str, List[str]] = {}
+        # Model list cache with TTL: {provider: (models_list, timestamp)}
+        self._model_list_cache: Dict[str, tuple[List[str], float]] = {}
+        self._model_list_ttl_seconds = int(os.getenv("MODEL_LIST_CACHE_TTL", "300"))  # 5 min default
+        self._model_list_cache_lock = asyncio.Lock()
         self._usage_initialized = False
         self._usage_init_lock = asyncio.Lock()
 
@@ -432,10 +435,18 @@ class RotatingClient:
         return base_count
 
     async def get_available_models(self, provider: str) -> List[str]:
-        """Get available models for a provider with caching."""
-        if provider in self._model_list_cache:
-            return self._model_list_cache[provider]
+        """Get available models for a provider with TTL-based caching."""
+        async with self._model_list_cache_lock:
+            if provider in self._model_list_cache:
+                models, timestamp = self._model_list_cache[provider]
+                if time.time() - timestamp < self._model_list_ttl_seconds:
+                    return models
+                # Expired, will refresh below
+        # Not in cache or expired - fetch fresh
+        return await self._fetch_available_models(provider)
 
+    async def _fetch_available_models(self, provider: str) -> List[str]:
+        """Fetch available models from provider and update cache."""
         credentials = self.all_credentials.get(provider, [])
         if not credentials:
             return []
@@ -459,7 +470,8 @@ class RotatingClient:
                     if self._model_resolver.is_model_allowed(m, provider)
                 ]
 
-                self._model_list_cache[provider] = final
+                async with self._model_list_cache_lock:
+                    self._model_list_cache[provider] = (final, time.time())
                 return final
 
             except Exception as e:
@@ -469,6 +481,19 @@ class RotatingClient:
                 continue
 
         return []
+
+    def invalidate_model_list_cache(self, provider: Optional[str] = None) -> None:
+        """Invalidate model list cache for a provider or all providers.
+
+        Args:
+            provider: Provider to invalidate, or None to invalidate all.
+        """
+        if provider:
+            self._model_list_cache.pop(provider, None)
+            lib_logger.debug(f"Invalidated model list cache for {provider}")
+        else:
+            self._model_list_cache.clear()
+            lib_logger.debug("Invalidated all model list caches")
 
     async def get_all_available_models(
         self,

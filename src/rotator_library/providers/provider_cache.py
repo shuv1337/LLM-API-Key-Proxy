@@ -119,6 +119,10 @@ class ProviderCache:
         self._cleanup_task: Optional[asyncio.Task] = None
         self._running = False
 
+        # Singleflight for concurrent disk lookups (key -> future)
+        self._inflight_lookups: Dict[str, asyncio.Future] = {}
+        self._inflight_lock = asyncio.Lock()
+
         # Statistics
         self._stats = {
             "memory_hits": 0,
@@ -423,10 +427,46 @@ class ProviderCache:
         return None
 
     async def _check_disk_fallback(self, key: str) -> None:
-        """Check disk for key and load into memory if found (background)."""
+        """Check disk for key and load into memory if found (background).
+
+        Uses singleflight pattern to prevent concurrent lookups for the same key.
+        """
+        # Singleflight: check if lookup is already in flight
+        async with self._inflight_lock:
+            if key in self._inflight_lookups:
+                # Another task is already looking up this key, wait for it
+                try:
+                    await asyncio.wait_for(
+                        self._inflight_lookups[key], timeout=5.0
+                    )
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+                return
+            # Create a future to signal other waiters
+            future = asyncio.get_event_loop().create_future()
+            self._inflight_lookups[key] = future
+
+        try:
+            result = await self._do_disk_fallback_lookup(key)
+            # Signal success to waiters
+            async with self._inflight_lock:
+                if not future.done():
+                    future.set_result(result)
+        except Exception as e:
+            # Signal failure to waiters
+            async with self._inflight_lock:
+                if not future.done():
+                    future.set_exception(e)
+        finally:
+            # Clean up inflight tracking
+            async with self._inflight_lock:
+                self._inflight_lookups.pop(key, None)
+
+    async def _do_disk_fallback_lookup(self, key: str) -> bool:
+        """Actual disk lookup implementation. Returns True if found."""
         try:
             if not self._cache_file.exists():
-                return
+                return False
 
             async with self._disk_lock:
                 with open(self._cache_file, "r", encoding="utf-8") as f:
@@ -445,10 +485,13 @@ class ProviderCache:
                             lib_logger.debug(
                                 f"ProviderCache[{self._cache_name}]: Loaded {key} from disk"
                             )
+                            return True
+            return False
         except Exception as e:
             lib_logger.debug(
                 f"ProviderCache[{self._cache_name}]: Disk fallback failed: {e}"
             )
+            return False
 
     async def _disk_retrieve(self, key: str) -> Optional[str]:
         """Direct disk retrieval with loading into memory."""

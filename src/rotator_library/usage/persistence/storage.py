@@ -87,33 +87,41 @@ class UsageStorage:
         Returns:
             Tuple of (states dict, fair_cycle_global dict, loaded_from_file bool)
         """
-        if not self.file_path.exists():
+        # Check existence in thread pool to avoid blocking
+        try:
+            exists = await asyncio.to_thread(self.file_path.exists)
+            if not exists:
+                return {}, {}, False
+        except Exception:
             return {}, {}, False
 
         try:
             async with self._file_lock():
-                data = safe_read_json(self.file_path, lib_logger, parse_json=True)
-
-            if not data:
-                return {}, {}, True
-
-            # Check schema version
-            version = data.get("schema_version", 1)
-            if version < self.CURRENT_SCHEMA_VERSION:
-                lib_logger.info(
-                    f"Migrating usage data from v{version} to v{self.CURRENT_SCHEMA_VERSION}"
+                # Run blocking file I/O in thread pool
+                data = await asyncio.to_thread(
+                    safe_read_json, self.file_path, lib_logger, parse_json=True
                 )
-                data = self._migrate(data, version)
 
-            # Parse credentials
-            states = {}
-            for stable_id, cred_data in data.get("credentials", {}).items():
-                state = self._parse_credential_state(stable_id, cred_data)
-                if state:
-                    states[stable_id] = state
+                if not data:
+                    return {}, {}, True
 
-            lib_logger.info(f"Loaded {len(states)} credentials from {self.file_path}")
-            return states, data.get("fair_cycle_global", {}), True
+                # Check schema version
+                version = data.get("schema_version", 1)
+                if version < self.CURRENT_SCHEMA_VERSION:
+                    lib_logger.info(
+                        f"Migrating usage data from v{version} to v{self.CURRENT_SCHEMA_VERSION}"
+                    )
+                    data = self._migrate(data, version)
+
+                # Parse credentials
+                states = {}
+                for stable_id, cred_data in data.get("credentials", {}).items():
+                    state = self._parse_credential_state(stable_id, cred_data)
+                    if state:
+                        states[stable_id] = state
+
+                lib_logger.info(f"Loaded {len(states)} credentials from {self.file_path}")
+                return states, data.get("fair_cycle_global", {}), True
 
         except json.JSONDecodeError as e:
             lib_logger.error(f"Failed to parse usage file: {e}")
@@ -163,7 +171,8 @@ class UsageStorage:
                     )
                     data["accessor_index"][state.accessor] = stable_id
 
-                saved = self._writer.write(data)
+                # Run blocking write in thread pool to avoid event loop stalls
+                saved = await asyncio.to_thread(self._writer.write, data)
 
                 if saved:
                     self._last_save = now

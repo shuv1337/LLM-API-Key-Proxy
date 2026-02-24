@@ -45,11 +45,12 @@ class EmbeddingBatcher:
                 # Distribute results back to the original requesters
                 for i, future in enumerate(futures):
                     # Create a new response object for each item in the batch
+                    # Usage is attached only to the first result; caller must extract it once
                     single_response_data = {
                         "object": response.object,
                         "model": response.model,
                         "data": [response.data[i]],
-                        "usage": response.usage # Usage is for the whole batch
+                        "usage": response.usage if i == 0 else None
                     }
                     future.set_result(single_response_data)
 
